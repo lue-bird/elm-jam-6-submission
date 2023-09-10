@@ -17,3 +17,17 @@ and open the index.html file or better
 serve
 ```
   - [vercel/serve](https://github.com/vercel/serve)
+
+## brainstorm
+
+game rules are an illusion – they only exist in your head based on your previous intuition
+  - game world but you can drag&drop everything "let the ball reach the right side!"
+      - level
+        → drag the ball to the right
+      - level. Way for ball blocked off by un-passable red block
+        → drag the red block above the ball to the left
+      - level. An area marked green that the ball can't leave
+        → drag the green box closer to the right
+      - ? level. Right blocked off by a red block that's passable
+        → drag the ball to the right
+  - birds with wings fly by, you can drag their wings to your body
