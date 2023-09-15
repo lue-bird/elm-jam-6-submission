@@ -1,10 +1,10 @@
 ## dragahedron
 
-> Just click the play button
+→ [play online](https://lue-bird.github.io/elm-jam-6-submission/), [itch page](https://lue-bird.itch.io/dragahedron)
+
+> Just click the triangular play button
 
 Simplistic game, built using [elm](https://elm-lang.org/) for the [elm jam 6](https://itch.io/jam/elm-game-jam-6).
-
-→ [play online](https://lue-bird.github.io/elm-jam-6-submission/)
 
 ### run locally
 ```noformatingples
