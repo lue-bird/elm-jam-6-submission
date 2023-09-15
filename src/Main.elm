@@ -32,25 +32,26 @@ import Element.Border as UiBorder
 import Element.Font as UiFont
 import Element.Input as UiInput
 import Frame2d exposing (Frame2d)
+import Frame3d
 import Html exposing (Html)
 import Html.Attributes
 import Html.Events
 import Json.Decode exposing (Decoder)
 import Json.Encode
 import Key
-import Length exposing (Meters, millimeters)
+import Length exposing (Length, Meters, millimeters)
 import LineSegment2d exposing (LineSegment2d)
 import List.Extra
 import Mass exposing (kilograms)
-import Physics.Body as Body exposing (Body)
+import Physics.Body exposing (Body)
 import Physics.Constraint as Constraint
 import Physics.Coordinates exposing (BodyCoordinates, WorldCoordinates)
 import Physics.Shape
-import Physics.World as World exposing (World)
+import Physics.World exposing (World)
 import Pixels exposing (Pixels, pixels)
 import Plane3d
 import Point2d exposing (Point2d)
-import Point3d
+import Point3d exposing (Point3d)
 import Quantity exposing (Quantity, Rate)
 import Random
 import Random.Extra
@@ -59,51 +60,22 @@ import RecordWithoutConstructorFunction exposing (RecordWithoutConstructorFuncti
 import Rectangle2d
 import Scene3d exposing (Entity)
 import Scene3d.Material as Material
+import Scene3d.Mesh
 import Sphere3d
 import Task
 import Time
 import Tree exposing (Tree)
 import Tree.Path exposing (TreePath)
+import Triangle3d
 import Vector2d exposing (Vector2d)
+import Vector3d
 import Viewpoint3d
 import VirtualDom
 
 
-type SpecificOrShared specific shared
-    = Specific specific
-    | Shared shared
-
-
-type alias SpecificAndShared specific shared =
-    RecordWithoutConstructorFunction
-        { shared : shared
-        , specific : specific
-        }
-
-
-type MenuOrGame menu game
-    = Menu menu
-    | Game game
-
-
-type alias Event =
-    SpecificOrShared EventSpecific EventShared
-
-
-type EventShared
+type Event
     = AudioLoaded { piece : AudioKind, result : Result Audio.LoadError Audio.Source }
-
-
-type alias EventSpecific =
-    MenuOrGame MenuEvent GameEvent
-
-
-type MenuEvent
-    = GameStartClicked
-
-
-type GameEvent
-    = GameWindowSized { width : Float, height : Float }
+    | GameWindowSized { width : Float, height : Float }
     | InitialRandomSeedReceived Random.Seed
     | InitialTimeReceived Time.Posix
     | FrameTickPassed Time.Posix
@@ -115,55 +87,29 @@ type GameEvent
 
 
 type alias State =
-    SpecificAndShared StateSpecific StateShared
-
-
-type alias StateShared =
     RecordWithoutConstructorFunction
         { audio : EachAudio (Result Audio.LoadError Audio.Source)
-        }
-
-
-type alias StateSpecific =
-    MenuOrGame MenuState GameState
-
-
-type alias MenuState =
-    RecordWithoutConstructorFunction
-        {}
-
-
-type alias GameState =
-    RecordWithoutConstructorFunction
-        { windowSize : { width : Float, height : Float }
+        , windowSize : { width : Float, height : Float }
         , audioTimes : EachAudio (List Time.Posix)
         , keysPressed : List Key.Key
         , randomSeed : Random.Seed
         , lastTick : Time.Posix
         , initialTime : Time.Posix
         , world : World BodyKind
-        , maybeRaycastResult : Maybe (World.RaycastResult BodyKind)
+        , camera : Camera3d Meters WorldCoordinates
+        , maybeRaycastResult : Maybe (Physics.World.RaycastResult BodyKind)
+        , playerPast : PlayerPast
         }
 
 
-type alias Effect =
-    SpecificOrShared EffectSpecific EffectShared
+type PlayerPast
+    = PlayerPastFrozen (List (Point3d Meters WorldCoordinates))
+    | PlayerLeavingTrail (List (Point3d Meters WorldCoordinates))
 
 
-type alias EffectSpecific =
-    MenuOrGame MenuEffect GameEffect
-
-
-type EffectShared
+type Effect
     = LoadAudio AudioKind
-
-
-type MenuEffect
-    = MenuEffectNoneYet Never
-
-
-type GameEffect
-    = RequestInitialRandomSeed
+    | RequestInitialRandomSeed
     | RequestInitialTime
     | GameRequestInitialWindowSize
 
@@ -189,30 +135,24 @@ main =
 
 
 type AudioKind
-    = AudioMirrorGrow
-    | AudioMirrorPlace
-    | AudioMirrorGrab
+    = AudioRoomChange
     | AudioMusic
 
 
 audioKinds : List AudioKind
 audioKinds =
-    [ AudioMirrorGrow, AudioMirrorPlace, AudioMirrorGrab, AudioMusic ]
+    [ AudioRoomChange, AudioMusic ]
 
 
 type alias EachAudio perKind =
-    { mirrorGrow : perKind
-    , mirrorPlace : perKind
-    , mirrorGrab : perKind
+    { roomChange : perKind
     , music : perKind
     }
 
 
 eachAudio : perKind -> EachAudio perKind
 eachAudio perKind =
-    { mirrorGrow = perKind
-    , mirrorPlace = perKind
-    , mirrorGrab = perKind
+    { roomChange = perKind
     , music = perKind
     }
 
@@ -220,14 +160,8 @@ eachAudio perKind =
 alterAudioOfKind : AudioKind -> (a -> a) -> EachAudio a -> EachAudio a
 alterAudioOfKind kind f =
     case kind of
-        AudioMirrorGrow ->
-            \r -> { r | mirrorGrow = r.mirrorGrow |> f }
-
-        AudioMirrorPlace ->
-            \r -> { r | mirrorPlace = r.mirrorPlace |> f }
-
-        AudioMirrorGrab ->
-            \r -> { r | mirrorGrab = r.mirrorGrab |> f }
+        AudioRoomChange ->
+            \r -> { r | roomChange = r.roomChange |> f }
 
         AudioMusic ->
             \r -> { r | music = r.music |> f }
@@ -236,14 +170,8 @@ alterAudioOfKind kind f =
 accessAudioOfKind : AudioKind -> EachAudio a -> a
 accessAudioOfKind kind =
     case kind of
-        AudioMirrorGrow ->
-            .mirrorGrow
-
-        AudioMirrorPlace ->
-            .mirrorPlace
-
-        AudioMirrorGrab ->
-            .mirrorGrab
+        AudioRoomChange ->
+            .roomChange
 
         AudioMusic ->
             .music
@@ -253,14 +181,8 @@ audioPieceToName : AudioKind -> String
 audioPieceToName =
     \audioPiece ->
         case audioPiece of
-            AudioMirrorGrow ->
-                "mirror-grow"
-
-            AudioMirrorPlace ->
-                "mirror-place"
-
-            AudioMirrorGrab ->
-                "mirror-grab"
+            AudioRoomChange ->
+                "room-change"
 
             AudioMusic ->
                 "music"
@@ -269,22 +191,22 @@ audioPieceToName =
 init : () -> Reaction State Effect
 init () =
     Reaction.to
-        { specific = Menu {}
-        , shared =
-            { audio = eachAudio (Err Audio.UnknownError) }
-        }
-        |> Reaction.effectsAdd
-            (audioKinds |> List.map (\piece -> LoadAudio piece |> Shared))
-
-
-initGame : Reaction GameState GameEffect
-initGame =
-    Reaction.to
-        { windowSize =
+        { audio = eachAudio (Err Audio.UnknownError)
+        , windowSize =
             -- dummy
             { width = 0, height = 0 }
         , audioTimes = eachAudio []
         , world = initialWorld
+        , camera =
+            Camera3d.perspective
+                { viewpoint =
+                    Viewpoint3d.lookAt
+                        { eyePoint = Point3d.meters 0 0 cameraHeight
+                        , focalPoint = Point3d.origin
+                        , upDirection = Direction3d.positiveZ
+                        }
+                , verticalFieldOfView = Angle.degrees 60
+                }
         , maybeRaycastResult = Nothing
         , keysPressed = []
         , randomSeed =
@@ -296,160 +218,278 @@ initGame =
         , lastTick =
             -- dummy
             Time.millisToPosix -1
+        , playerPast = PlayerLeavingTrail []
         }
         |> Reaction.effectsAdd
             [ RequestInitialRandomSeed
             , RequestInitialTime
             , GameRequestInitialWindowSize
             ]
+        |> Reaction.effectsAdd
+            (audioKinds |> List.map LoadAudio)
 
 
-withShared : shared -> specific -> { specific : specific, shared : shared }
-withShared shared =
-    \specific -> { specific = specific, shared = shared }
+cameraHeight =
+    1.05
+
+
+
+-- 55
 
 
 reactTo : Event -> (State -> Reaction State Effect)
 reactTo event =
     case event of
-        Shared eventShared ->
-            \state ->
-                reactToShared eventShared state
-                    |> Reaction.effectMap Shared
-
-        Specific eventSpecific ->
-            \state ->
-                reactToSpecific eventSpecific state
-
-
-reactToSpecific : EventSpecific -> (State -> Reaction State Effect)
-reactToSpecific eventSpecific =
-    case eventSpecific of
-        Menu menuEvent ->
-            \state ->
-                case state.specific of
-                    Menu menuState ->
-                        menuState
-                            |> menuReactTo menuEvent
-                            |> Reaction.map (withShared state.shared)
-
-                    _ ->
-                        Reaction.to state
-
-        Game gameEvent ->
-            \state ->
-                case state.specific of
-                    Game gameState ->
-                        gameState
-                            |> gameReactTo gameEvent
-                            |> Reaction.map (withShared state.shared)
-
-                    _ ->
-                        Reaction.to state
-
-
-reactToShared : EventShared -> (State -> Reaction State EffectShared)
-reactToShared eventShared =
-    case eventShared of
         AudioLoaded audioLoaded ->
             \state ->
                 Reaction.to
                     { state
-                        | shared =
-                            { audio =
-                                state.shared.audio
-                                    |> alterAudioOfKind audioLoaded.piece (\_ -> audioLoaded.result)
-                            }
+                        | audio =
+                            state.audio
+                                |> alterAudioOfKind audioLoaded.piece (\_ -> audioLoaded.result)
                     }
 
-
-menuReactTo : MenuEvent -> (MenuState -> Reaction StateSpecific Effect)
-menuReactTo menuEvent =
-    case menuEvent of
-        GameStartClicked ->
-            \_ -> initGame |> Reaction.map Game |> Reaction.effectMap (Game >> Specific)
-
-
-gameReactTo : GameEvent -> (GameState -> Reaction StateSpecific Effect)
-gameReactTo event =
-    case event of
         GameWindowSized size ->
-            \state -> Reaction.to ({ state | windowSize = size } |> Game)
+            \state -> Reaction.to { state | windowSize = size }
 
         InitialRandomSeedReceived initialRandomSeed ->
             \state ->
                 Reaction.to
-                    ({ state | randomSeed = initialRandomSeed }
-                        |> Game
-                    )
+                    { state | randomSeed = initialRandomSeed }
 
         InitialTimeReceived initialTime ->
             \state ->
                 Reaction.to
-                    ({ state
+                    { state
                         | initialTime = initialTime
                         , lastTick = initialTime
-                     }
-                        |> Game
-                    )
+                    }
 
         FrameTickPassed newSimulationTime ->
             \state ->
                 let
                     sinceLastTick =
                         Duration.from state.lastTick newSimulationTime
+
+                    withNewLastTick =
+                        { state
+                            | lastTick = newSimulationTime
+                        }
+
+                    newSimulatedPhysicsWorld =
+                        Physics.World.simulate sinceLastTick state.world
                 in
-                Reaction.to
-                    ({ state
-                        | lastTick = newSimulationTime
-                        , world = World.simulate (seconds (1 / 60)) state.world
-                     }
-                        |> Game
-                    )
+                case
+                    newSimulatedPhysicsWorld
+                        |> Physics.World.bodies
+                        |> List.filterMap
+                            (\body ->
+                                case body |> Physics.Body.data of
+                                    Player ->
+                                        Just body
+
+                                    _ ->
+                                        Nothing
+                            )
+                of
+                    -- impossible
+                    [] ->
+                        Reaction.to withNewLastTick
+
+                    playerBody :: _ ->
+                        let
+                            ( playerX, playerY, _ ) =
+                                playerBody |> Physics.Body.originPoint |> Point3d.toTuple Length.inMeters
+
+                            roomCenter =
+                                { x = playerX |> round |> toFloat
+                                , y = (playerY / ratioWidthToHeight |> round |> toFloat) * ratioWidthToHeight
+                                }
+
+                            newCameraHeight =
+                                case withNewLastTick.playerPast of
+                                    PlayerLeavingTrail _ ->
+                                        cameraHeight
+
+                                    PlayerPastFrozen _ ->
+                                        ((withNewLastTick.camera |> Camera3d.viewpoint |> Viewpoint3d.eyePoint |> Point3d.zCoordinate |> Length.inMeters)
+                                            + 0.001
+                                        )
+                                            * 1.0015
+
+                            cameraInNewRoom =
+                                Camera3d.perspective
+                                    { viewpoint =
+                                        Viewpoint3d.lookAt
+                                            { eyePoint =
+                                                Point3d.meters
+                                                    -- snap to rooms
+                                                    roomCenter.x
+                                                    roomCenter.y
+                                                    newCameraHeight
+                                            , focalPoint = Point3d.meters roomCenter.x roomCenter.y 0
+                                            , upDirection = Direction3d.positiveZ
+                                            }
+                                    , verticalFieldOfView = Angle.degrees 60
+                                    }
+
+                            withCameraInNewRoom =
+                                { withNewLastTick
+                                    | camera = cameraInNewRoom
+                                    , playerPast =
+                                        if playerX >= 16.94 then
+                                            case withNewLastTick.playerPast of
+                                                PlayerLeavingTrail trail ->
+                                                    PlayerPastFrozen (trail |> List.reverse)
+
+                                                PlayerPastFrozen _ ->
+                                                    withNewLastTick.playerPast
+
+                                        else
+                                            case withNewLastTick.playerPast of
+                                                PlayerLeavingTrail trail ->
+                                                    if playerBody |> Physics.Body.velocity |> Vector3d.for Duration.second |> Vector3d.length |> Quantity.lessThan (Length.meters 0.0001) then
+                                                        withNewLastTick.playerPast
+
+                                                    else
+                                                        PlayerLeavingTrail
+                                                            ((playerBody |> Physics.Body.originPoint) :: trail)
+
+                                                PlayerPastFrozen [] ->
+                                                    PlayerPastFrozen []
+
+                                                PlayerPastFrozen (_ :: trailAfterPosition) ->
+                                                    PlayerPastFrozen trailAfterPosition
+                                }
+
+                            newPhysicsWorld =
+                                newSimulatedPhysicsWorld
+                                    |> Physics.World.update
+                                        (\body ->
+                                            case body |> Physics.Body.data of
+                                                MouseImitation mouseImitation ->
+                                                    if playerX >= ((body |> Physics.Body.originPoint |> Point3d.xCoordinate |> Length.inMeters) - 1) && playerX < 16.5 then
+                                                        let
+                                                            toPlayerX =
+                                                                Vector3d.from
+                                                                    (body |> Physics.Body.originPoint)
+                                                                    (Point3d.meters
+                                                                        playerX
+                                                                        (body |> Physics.Body.originPoint |> Point3d.yCoordinate |> Length.inMeters)
+                                                                        0
+                                                                    )
+                                                        in
+                                                        body
+                                                            |> Physics.Body.applyForce
+                                                                (Quantity.times
+                                                                    ((toPlayerX |> Vector3d.length |> Length.inMeters) |> Acceleration.metersPerSecondSquared)
+                                                                    (Mass.kilograms 0.2)
+                                                                )
+                                                                (toPlayerX |> Vector3d.direction |> Maybe.withDefault Direction3d.positiveX)
+                                                                (body |> Physics.Body.originPoint)
+
+                                                    else
+                                                        body
+
+                                                PlayerPast ->
+                                                    case withNewLastTick.playerPast of
+                                                        PlayerLeavingTrail _ ->
+                                                            body
+
+                                                        PlayerPastFrozen [] ->
+                                                            body
+
+                                                        PlayerPastFrozen (position :: trailAfterPosition) ->
+                                                            body
+                                                                |> Physics.Body.moveTo
+                                                                    (position
+                                                                        |> Point3d.translateBy (Vector3d.meters 17 -(1.5 * ratioWidthToHeight) 0)
+                                                                    )
+                                                                |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.01)
+
+                                                _ ->
+                                                    body
+                                        )
+
+                            ( oldCameraX, oldCameraY, _ ) =
+                                state.camera |> Camera3d.viewpoint |> Viewpoint3d.eyePoint |> Point3d.toTuple Length.inMeters
+                        in
+                        if oldCameraX /= roomCenter.x || oldCameraY /= roomCenter.y then
+                            Reaction.to
+                                { withCameraInNewRoom
+                                    | world =
+                                        newPhysicsWorld
+                                            |> Physics.World.keepIf
+                                                (\body -> Physics.Body.data body /= Mouse)
+                                    , audioTimes =
+                                        withCameraInNewRoom.audioTimes
+                                            |> (\r -> { r | roomChange = r.roomChange |> (::) newSimulationTime })
+                                }
+
+                        else if
+                            Vector3d.length (playerBody |> Physics.Body.velocity |> Vector3d.for Duration.second)
+                                |> Quantity.greaterThan (Length.meters 1.4)
+                        then
+                            Reaction.to
+                                { withCameraInNewRoom
+                                    | world =
+                                        newPhysicsWorld
+                                            |> Physics.World.keepIf (\body -> (body |> Physics.Body.data) /= Mouse)
+                                            |> Physics.World.update
+                                                (\body ->
+                                                    if body == playerBody then
+                                                        body |> Physics.Body.withDamping { angular = 0.2, linear = 0.5 }
+
+                                                    else
+                                                        body |> Physics.Body.withDamping playerDefaultDamping
+                                                )
+                                }
+
+                        else
+                            Reaction.to
+                                { withCameraInNewRoom
+                                    | world = newPhysicsWorld
+                                }
 
         KeyPressed key ->
             \state ->
                 Reaction.to
-                    ({ state | keysPressed = state.keysPressed |> (::) key }
-                        |> Game
-                    )
+                    { state | keysPressed = state.keysPressed |> (::) key }
 
         KeyReleased key ->
             \state ->
                 Reaction.to
-                    ({ state
+                    { state
                         | keysPressed =
                             state.keysPressed |> List.filter (\keyPressed -> keyPressed /= key)
-                     }
-                        |> Game
-                    )
+                    }
 
         MousePressed mouseRay ->
             \model ->
-                case World.raycast mouseRay model.world of
+                case Physics.World.raycast mouseRay model.world of
                     Just raycastResult ->
-                        if raycastResult.body |> Body.data |> isDraggable then
+                        if raycastResult.body |> Physics.Body.data |> isDraggable then
                             let
                                 worldPoint =
                                     Point3d.placeIn
-                                        (Body.frame raycastResult.body)
+                                        (Physics.Body.frame raycastResult.body)
                                         raycastResult.point
 
                                 mouse =
-                                    Body.compound [] Mouse
-                                        |> Body.moveTo worldPoint
+                                    Physics.Body.compound [] Mouse
+                                        |> Physics.Body.moveTo worldPoint
                             in
                             Reaction.to
-                                ({ model
+                                { model
                                     | maybeRaycastResult = Just raycastResult
                                     , world =
                                         model.world
-                                            |> World.add mouse
-                                            |> World.constrain
+                                            |> Physics.World.add mouse
+                                            |> Physics.World.constrain
                                                 (\b1 b2 ->
-                                                    case Body.data b1 of
+                                                    case Physics.Body.data b1 of
                                                         Mouse ->
-                                                            if (b2 |> Body.data) == (raycastResult.body |> Body.data) then
+                                                            if b2 == raycastResult.body then
                                                                 [ Constraint.pointToPoint
                                                                     Point3d.origin
                                                                     raycastResult.point
@@ -461,15 +501,13 @@ gameReactTo event =
                                                         _ ->
                                                             []
                                                 )
-                                 }
-                                    |> Game
-                                )
+                                }
 
                         else
-                            Reaction.to (model |> Game)
+                            Reaction.to model
 
                     Nothing ->
-                        Reaction.to (model |> Game)
+                        Reaction.to model
 
         MouseMoved mouseRay ->
             \state ->
@@ -478,23 +516,23 @@ gameReactTo event =
                         let
                             worldPoint =
                                 Point3d.placeIn
-                                    (Body.frame raycastResult.body)
+                                    (Physics.Body.frame raycastResult.body)
                                     raycastResult.point
 
                             plane =
                                 Plane3d.through
                                     worldPoint
-                                    (Viewpoint3d.viewDirection (Camera3d.viewpoint camera))
+                                    (Viewpoint3d.viewDirection (Camera3d.viewpoint state.camera))
                         in
                         Reaction.to
-                            ({ state
+                            { state
                                 | world =
-                                    World.update
+                                    Physics.World.update
                                         (\body ->
-                                            if Body.data body == Mouse then
+                                            if Physics.Body.data body == Mouse then
                                                 case Axis3d.intersectionWithPlane plane mouseRay of
                                                     Just intersection ->
-                                                        Body.moveTo intersection body
+                                                        Physics.Body.moveTo intersection body
 
                                                     Nothing ->
                                                         body
@@ -503,46 +541,36 @@ gameReactTo event =
                                                 body
                                         )
                                         state.world
-                             }
-                                |> Game
-                            )
+                            }
 
                     Nothing ->
-                        Reaction.to (state |> Game)
+                        Reaction.to state
 
         MouseReleased ->
             \state ->
                 Reaction.to
-                    ({ state
+                    { state
                         | maybeRaycastResult = Nothing
                         , world =
-                            World.keepIf
-                                (\body -> Body.data body /= Mouse)
-                                state.world
-                     }
-                        |> Game
-                    )
+                            state.world
+                                |> Physics.World.keepIf
+                                    (\body -> Physics.Body.data body /= Mouse)
+                    }
 
 
 subscriptions : State -> Sub Event
 subscriptions =
     \state ->
-        case state.specific of
-            Menu _ ->
-                Sub.none
-
-            Game _ ->
-                [ Browser.Events.onResize
-                    (\width height ->
-                        { width = width |> toFloat, height = height |> toFloat }
-                            |> GameWindowSized
-                    )
-                , Browser.Events.onAnimationFrame FrameTickPassed
-                , Browser.Events.onKeyDown (Json.Decode.map KeyPressed Key.decoder)
-                , Browser.Events.onKeyUp (Json.Decode.map KeyReleased Key.decoder)
-                ]
-                    |> Sub.batch
-                    |> Sub.map (Game >> Specific)
+        [ Browser.Events.onResize
+            (\width height ->
+                { width = width |> toFloat, height = height |> toFloat }
+                    |> GameWindowSized
+            )
+        , Browser.Events.onAnimationFrame FrameTickPassed
+        , Browser.Events.onKeyDown (Json.Decode.map KeyPressed Key.decoder)
+        , Browser.Events.onKeyUp (Json.Decode.map KeyReleased Key.decoder)
+        ]
+            |> Sub.batch
 
 
 port audioPortToJS : Json.Encode.Value -> Cmd msg_
@@ -555,28 +583,6 @@ interpretEffect : Effect -> Reaction.EffectInterpretation Event
 interpretEffect =
     \effect ->
         case effect of
-            Specific effectSpecific ->
-                effectSpecific |> interpretEffectSpecific
-
-            Shared effectShared ->
-                effectShared |> interpretEffectShared |> Reaction.effectInterpretationMap Shared
-
-
-interpretEffectSpecific : EffectSpecific -> Reaction.EffectInterpretation Event
-interpretEffectSpecific =
-    \effectSpecific ->
-        case effectSpecific of
-            Menu menuEffect ->
-                menuEffect |> menuInterpretEffect |> Reaction.effectInterpretationMap (Menu >> Specific)
-
-            Game gameEffect ->
-                gameEffect |> gameInterpretEffect |> Reaction.effectInterpretationMap (Game >> Specific)
-
-
-interpretEffectShared : EffectShared -> Reaction.EffectInterpretation EventShared
-interpretEffectShared =
-    \effectShared ->
-        case effectShared of
             LoadAudio piece ->
                 Reaction.audioCommands
                     [ Audio.loadAudio
@@ -584,19 +590,6 @@ interpretEffectShared =
                         ([ "public/", piece |> audioPieceToName, ".mp3" ] |> String.concat)
                     ]
 
-
-menuInterpretEffect : MenuEffect -> Reaction.EffectInterpretation MenuEvent
-menuInterpretEffect =
-    \effect ->
-        case effect of
-            MenuEffectNoneYet ever ->
-                never ever
-
-
-gameInterpretEffect : GameEffect -> Reaction.EffectInterpretation GameEvent
-gameInterpretEffect =
-    \effect ->
-        case effect of
             RequestInitialRandomSeed ->
                 Reaction.commands [ Random.independentSeed |> Random.generate InitialRandomSeedReceived ]
 
@@ -618,151 +611,719 @@ gameInterpretEffect =
 
 type BodyKind
     = Mouse
-    | Ball
+    | Player
     | Floor
-    | Table
+    | BlockingImmovableWall { length : Length }
+    | DraggableBlock { length : Length }
+    | DraggableBallWithCubeBehavior { radius : Length }
+    | MouseImitation { id : Maybe Int }
+    | PlayerImitation { id : Maybe Int }
+    | PlayerPast
 
 
 isDraggable : BodyKind -> Bool
 isDraggable kind =
     case kind of
-        Ball ->
+        Player ->
             True
 
-        Table ->
+        DraggableBlock _ ->
             True
+
+        DraggableBallWithCubeBehavior _ ->
+            True
+
+        PlayerImitation _ ->
+            True
+
+        PlayerPast ->
+            False
+
+        BlockingImmovableWall _ ->
+            False
 
         Mouse ->
+            False
+
+        MouseImitation _ ->
             False
 
         Floor ->
             False
 
 
+worldAddBodies additionalBodies world =
+    List.foldl
+        (\body worldSoFar -> worldSoFar |> Physics.World.add body)
+        world
+        additionalBodies
+
+
+connectedWithMouseImitations =
+    [ \id ->
+        ( mouseImitationAtXYWithData 14.6 -(0.7 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 13.9 -(1.1 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 14.5 -(1.4 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 13.6 -(1.4 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 14.05 -(0.6 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 13.75 -(0.9 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 13.7 -(1.1 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 13.9 -(1.3 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 12.6 -(0.7 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 12.9 -(1.1 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 13 -(1.4 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 12.6 -(1.4 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 13.05 -(0.4 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 12.75 -(0.9 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 13.3 -(1.5 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 12.9 -(1.3 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 11.6 -(0.7 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 11.9 -(1.1 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 12.6 -(0.2 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 12.9 -(1.1 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 14.3 -(1.4 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 14 -(1.4 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 12.05 -(0.4 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 11.75 -(0.9 * ratioWidthToHeight) 0)
+        )
+    , \id ->
+        ( mouseImitationAtXYWithData 13.3 -(1.5 * ratioWidthToHeight) { id = id }
+        , playerImitationWith { id = id }
+            |> Physics.Body.moveTo (Point3d.meters 12.9 -(1.3 * ratioWidthToHeight) 0)
+        )
+    ]
+        |> List.indexedMap (\i f -> f (Just i))
+
+
 initialWorld : World BodyKind
 initialWorld =
-    World.empty
-        |> World.withGravity (Acceleration.gees 1) Direction3d.negativeZ
-        |> World.add table
-        |> World.add (Body.plane Floor)
-        |> World.add
-            (Body.compound [ Physics.Shape.sphere ballShape ] Ball
-                |> Body.withBehavior (Body.dynamic (kilograms 25))
-                |> Body.moveTo (Point3d.fromMeters { x = 0, y = 0, z = 0.8 })
+    Physics.World.empty
+        |> Physics.World.withGravity (Acceleration.gees 1) Direction3d.negativeZ
+        |> Physics.World.add
+            (blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+                |> Physics.Body.rotateAround Axis3d.z (Angle.turns (1 / 4))
+                |> Physics.Body.moveTo (Point3d.meters -(1 / 2) 0 0)
+            )
+        |> worldAddBodies mainRoute
+        |> worldAddBodies (connectedWithMouseImitations |> List.map Tuple.first)
+        |> worldAddBodies (connectedWithMouseImitations |> List.map Tuple.second)
+        |> Physics.World.constrain
+            (\body0 body1 ->
+                case ( body0 |> Physics.Body.data, body1 |> Physics.Body.data ) of
+                    ( MouseImitation mouseImitationData, PlayerImitation playerImitationData ) ->
+                        case ( mouseImitationData.id, playerImitationData.id ) of
+                            ( Just mouseId, Just playerId ) ->
+                                if mouseId == playerId then
+                                    [ Constraint.distance (Length.meters 0.25)
+                                    ]
+
+                                else
+                                    []
+
+                            _ ->
+                                []
+
+                    _ ->
+                        []
+            )
+        |> worldAddBodies (mainRoute |> List.map (Physics.Body.translateBy (Vector3d.meters 17 -(1 * ratioWidthToHeight) 0)))
+        |> Physics.World.add (Physics.Body.plane Floor)
+        |> Physics.World.add
+            (Physics.Body.compound [ Physics.Shape.sphere (Sphere3d.atOrigin (Length.meters 0.15)) ] Player
+                |> Physics.Body.withBehavior (Physics.Body.dynamic (kilograms 1))
+                |> Physics.Body.withDamping playerDefaultDamping
+                -- |> Physics.Body.moveTo (Point3d.fromMeters { x = 14.2, y = -1.2, z = 0.22 })
+                |> Physics.Body.moveTo (Point3d.fromMeters { x = 0, y = 0, z = 0.22 })
+            )
+        |> Physics.World.add
+            (Physics.Body.compound [] PlayerPast
+                |> Physics.Body.withBehavior (Physics.Body.dynamic (Mass.kilograms 20))
+                |> Physics.Body.withDamping playerDefaultDamping
+                |> Physics.Body.moveTo (Point3d.fromMeters { x = 17, y = -1 * ratioWidthToHeight, z = 0.22 })
             )
 
 
-tableBlocks : List (Block3d Meters BodyCoordinates)
-tableBlocks =
-    let
-        leg =
-            50
-
-        y =
-            300
-
-        x =
-            1000
-
-        top =
-            400
-    in
-    [ Block3d.from
-        (Point3d.millimeters x y 0)
-        (Point3d.millimeters (x + leg) (y + leg) top)
-    , Block3d.from
-        (Point3d.millimeters -(x + leg) y 0)
-        (Point3d.millimeters -x (y + leg) top)
-    , Block3d.from
-        (Point3d.millimeters -(x + leg) -(y + leg) 0)
-        (Point3d.millimeters -x -y top)
-    , Block3d.from
-        (Point3d.millimeters x -(y + leg) 0)
-        (Point3d.millimeters (x + leg) -y top)
-    , Block3d.from
-        (Point3d.millimeters -(x + leg) -(y + leg) top)
-        (Point3d.millimeters (x + leg) (y + leg) (top + 50))
+mainRoute =
+    [ blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 0 -(ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 0 (ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 1 -(ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 1 (ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 2) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns -0.3)
+        |> Physics.Body.moveTo (Point3d.meters 0.9 (ratioWidthToHeight / 4) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 2) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.3)
+        |> Physics.Body.moveTo (Point3d.meters 1.3 -(ratioWidthToHeight / 4) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 2 -(ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 2 (ratioWidthToHeight / 2) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 2) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.3)
+        |> Physics.Body.moveTo (Point3d.meters 2.55 -(ratioWidthToHeight / 2) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 2) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.2)
+        |> Physics.Body.moveTo (Point3d.meters 2.54 (ratioWidthToHeight / 2) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 4) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.2)
+        |> Physics.Body.moveTo (Point3d.meters 2.7 0 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 4) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.3)
+        |> Physics.Body.moveTo (Point3d.meters 2.7 -(ratioWidthToHeight / 4) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 2) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 2.35 0 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight * 0.24) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.11)
+        |> Physics.Body.moveTo (Point3d.meters 2.1 -(ratioWidthToHeight * 0.35) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight * 0.24) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.37)
+        |> Physics.Body.moveTo (Point3d.meters 2.1 (ratioWidthToHeight * 0.32) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 3 -(1.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 2.5 (-1 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 3.5 (-1 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 3.25 -(0.7 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 3.25 -(0.9 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 3.25 -(1.1 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 3.25 -(1.3 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 3 (1.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 2.5 (1 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 3.5 (1 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 4) }
+        |> Physics.Body.moveTo (Point3d.meters 3.25 (0.9 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 4) }
+        |> Physics.Body.moveTo (Point3d.meters 2.75 (1.2 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 4 -(ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 4 (ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 5 (ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.11)
+        |> Physics.Body.moveTo (Point3d.meters 4.92 -(0.345 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.39)
+        |> Physics.Body.moveTo (Point3d.meters 5 (0.35 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 6 -(ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 6 (ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 6.5 0 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 6 -(0.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 6 -(1.5 * ratioWidthToHeight) -0.298)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 5 -(1.5 * ratioWidthToHeight) -0.298)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 4.5 -ratioWidthToHeight 0)
+    , blockingImmovableWallBody { length = Length.meters 0.1 }
+        |> Physics.Body.moveTo (Point3d.meters 5.4 -(0.5 * ratioWidthToHeight) 0)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 5.4 -(0.5 * ratioWidthToHeight) 0.2)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 5.3 -(0.55 * ratioWidthToHeight) 0.2)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 5.2 -(0.6 * ratioWidthToHeight) 0.2)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.1 }
+        |> Physics.Body.moveTo (Point3d.meters 5.9 -(1.25 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 5.6 -(1.35 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.1 }
+        |> Physics.Body.moveTo (Point3d.meters 5.9 -(1 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 6.1 -(0.9 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 6.3 -(0.7 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.1 }
+        |> Physics.Body.moveTo (Point3d.meters 5.9 -(1.75 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 5.6 -(1.85 * ratioWidthToHeight) 0.3)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 6 -(2.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 5 -(2.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 6.5 -(2 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 4.5 -(2 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 5.5 -(0.65 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 5.5 -(0.8 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 5.5 -(0.95 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 5.5 -(1.1 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 5.5 -(1.25 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 5.5 -(1.4 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 6.25 -(1.7 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 6.25 -(1.9 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 6.25 -(2.1 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 6.25 -(2.3 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 6 -(1.7 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 6 -(1.9 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 6 -(2.1 * ratioWidthToHeight) 0)
+    , draggableBlockBody { length = Length.meters (ratioWidthToHeight / 10) }
+        |> Physics.Body.moveTo (Point3d.meters 6 -(2.3 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 7 -(0.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 7 -(1.5 * ratioWidthToHeight) 0)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.1 }
+        |> Physics.Body.moveTo (Point3d.meters 6.9 -(1.25 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 7.8 -(1.35 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.1 }
+        |> Physics.Body.moveTo (Point3d.meters 7.9 -(1 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 7.1 -(0.9 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 6.3 -(0.7 * ratioWidthToHeight) 0.3)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 8 -(0.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 8 -(1.5 * ratioWidthToHeight) 0)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 7.9 -(1.25 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 8.8 -(1.35 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.05 }
+        |> Physics.Body.moveTo (Point3d.meters 8.9 -(1 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 8.1 -(0.86 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.18 }
+        |> Physics.Body.moveTo (Point3d.meters 8.3 -(0.6 * ratioWidthToHeight) 0.3)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 9 -(0.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 9 -(1.5 * ratioWidthToHeight) 0)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.1 }
+        |> Physics.Body.moveTo (Point3d.meters 8.9 -(1.25 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 9.8 -(1.35 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.1 }
+        |> Physics.Body.moveTo (Point3d.meters 9.9 -(1 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 9.1 -(0.9 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 10.3 -(0.7 * ratioWidthToHeight) 0.3)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 10 -(0.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 10 -(1.5 * ratioWidthToHeight) 0)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 9.9 -(1.25 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 10.8 -(1.35 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.05 }
+        |> Physics.Body.moveTo (Point3d.meters 10.9 -(1 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.07 }
+        |> Physics.Body.moveTo (Point3d.meters 10.1 -(0.86 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.18 }
+        |> Physics.Body.moveTo (Point3d.meters 10.3 -(0.6 * ratioWidthToHeight) 0.3)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 11 -(0.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 11 -(0.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 11 -(1.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 12 -(0.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 12 -(1.5 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 8.5 -(1 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 9.8 -(0.7 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 10.2 -(1.3 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 10.6 -(1 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 10.75 -(0.7 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 10.9 -(1.3 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 11 -(1.05 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 11.15 -(0.6 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 11.3 -(1.2 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 11.2 -(1.3 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 11.6 -(1 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 11.75 -(0.7 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 11.9 -(1.3 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 12 -(1.05 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 12.15 -(0.6 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 12.3 -(1.2 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 11.6 -(1 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 11.75 -(0.7 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 12.9 -(1.1 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 12.6 -(1.4 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 12.75 -(0.9 * ratioWidthToHeight) 0)
+    , playerImitation
+        |> Physics.Body.moveTo (Point3d.meters 12.9 -(1.3 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 13 -(2.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 13 (ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 14 -(2.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 14 (ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 12.5 -(2 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 12.5 (0 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 14.5 -(2 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters ratioWidthToHeight }
+        |> Physics.Body.rotateAround Axis3d.z (Angle.turns 0.25)
+        |> Physics.Body.moveTo (Point3d.meters 14.5 (0 * ratioWidthToHeight) 0)
+    , mouseImitationAtXY 14.8 -(0.9 * ratioWidthToHeight)
+    , mouseImitationAtXY 14.2 -(1.2 * ratioWidthToHeight)
+    , mouseImitationAtXY 14 -(0.9 * ratioWidthToHeight)
+    , mouseImitationAtXY 13.6 -(0.7 * ratioWidthToHeight)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 14.2 -(2.2 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 14.2 (0.4 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 13.9 -(2 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 13.8 -(0 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 13.2 -(2.4 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 13.4 (0.4 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 12.9 -(2 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 12.8 -(0 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 14.2 -(1.7 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 14.2 -(0.1 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 13.9 -(1.5 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 13.8 -(0.5 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 13.2 -(1.9 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 13.4 -(0.1 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.11 }
+        |> Physics.Body.moveTo (Point3d.meters 12.9 -(1.5 * ratioWidthToHeight) 0.3)
+    , draggableBallWithCubeBehavior { radius = Length.meters 0.09 }
+        |> Physics.Body.moveTo (Point3d.meters 12.8 -(0.5 * ratioWidthToHeight) 0.3)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 15 -(ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 15 -(1.5 * ratioWidthToHeight) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 16 -(ratioWidthToHeight / 2) 0)
+    , blockingImmovableWallBody { length = Length.meters 1 }
+        |> Physics.Body.moveTo (Point3d.meters 16 -(1.5 * ratioWidthToHeight) 0)
     ]
 
 
-table : Body BodyKind
-table =
-    Body.compound (List.map Physics.Shape.block tableBlocks) Table
-        |> Body.withBehavior (Body.dynamic (kilograms 80))
+mouseImitationAtXY x y =
+    mouseImitationAtXYWithData x y { id = Nothing }
 
 
-camera : Camera3d Meters WorldCoordinates
-camera =
-    Camera3d.perspective
-        { viewpoint =
-            Viewpoint3d.lookAt
-                { eyePoint = Point3d.meters 3 4 2
-                , focalPoint = Point3d.meters -0.5 -0.5 0
-                , upDirection = Direction3d.positiveZ
+mouseImitationAtXYWithData x y data =
+    Physics.Body.compound [ Physics.Shape.sphere (Sphere3d.atOrigin (Length.meters 0.02)) ]
+        (MouseImitation data)
+        |> Physics.Body.withBehavior (Physics.Body.dynamic (Mass.kilograms 1.4))
+        |> Physics.Body.moveTo (Point3d.meters x y 0)
+
+
+playerDefaultDamping =
+    { angular = 0.15, linear = 0.1 }
+
+
+blockingImmovableWallBody dimensions =
+    Physics.Body.compound [ Physics.Shape.block (thickLinearBlock dimensions) ]
+        (BlockingImmovableWall dimensions)
+
+
+draggableBlockBody dimensions =
+    Physics.Body.compound [ Physics.Shape.block (thickLinearBlock dimensions) ]
+        (DraggableBlock dimensions)
+        |> Physics.Body.withBehavior (Physics.Body.dynamic (kilograms 100))
+
+
+draggableBallWithCubeBehavior data =
+    let
+        colliderSideLength =
+            data.radius |> Quantity.multiplyBy 1.3
+    in
+    Physics.Body.block
+        (Block3d.centeredOn
+            Frame3d.atOrigin
+            ( colliderSideLength, colliderSideLength, colliderSideLength )
+        )
+        (DraggableBallWithCubeBehavior data)
+        |> Physics.Body.withBehavior (Physics.Body.dynamic (kilograms 1))
+
+
+playerImitation =
+    playerImitationWith { id = Nothing }
+
+
+playerImitationWith data =
+    Physics.Body.compound [ Physics.Shape.sphere (Sphere3d.atOrigin (Length.meters 0.15)) ] (PlayerImitation data)
+        |> Physics.Body.withBehavior (Physics.Body.dynamic (kilograms 1))
+        |> Physics.Body.withDamping playerDefaultDamping
+
+
+tetrahedronWithRadius1 =
+    let
+        -- https://en.wikipedia.org/wiki/Tetrahedron
+        p0 =
+            Point3d.meters (sqrt (8 / 9)) 0 (-1 / 3)
+
+        p1 =
+            Point3d.meters -(sqrt (2 / 9)) (sqrt (2 / 3)) (-1 / 3)
+
+        p2 =
+            Point3d.meters -(sqrt (2 / 9)) -(sqrt (2 / 3)) (-1 / 3)
+
+        p3 =
+            Point3d.meters 0 0 1
+    in
+    Scene3d.Mesh.facets
+        [ Triangle3d.from p0 p1 p2
+        , Triangle3d.from p0 p1 p3
+        , Triangle3d.from p0 p2 p3
+        , Triangle3d.from p1 p2 p3
+        ]
+
+
+ratioWidthToHeight : Float
+ratioWidthToHeight =
+    16 / 9
+
+
+ui : State -> Html Event
+ui state =
+    let
+        adjustedSize =
+            if state.windowSize.width < state.windowSize.height * ratioWidthToHeight then
+                -- disproportional in height
+                { width = state.windowSize.width
+                , height = state.windowSize.width / ratioWidthToHeight
                 }
-        , verticalFieldOfView = Angle.degrees 24
-        }
 
+            else
+                -- might be disproportional in width
+                { width = state.windowSize.height * ratioWidthToHeight
+                , height = state.windowSize.height
+                }
 
-gameUi : GameState -> Html GameEvent
-gameUi state =
+        ratioScreenHeightToSceneMeter =
+            1
+
+        rayTo point =
+            Camera3d.ray
+                state.camera
+                (Rectangle2d.with
+                    { x1 = pixels 0
+                    , y1 = Pixels.float adjustedSize.height
+                    , x2 = Pixels.float adjustedSize.width
+                    , y2 = pixels 0
+                    }
+                )
+                point
+    in
     Html.div
-        [ Html.Attributes.style "position" "absolute"
-        , Html.Attributes.style "left" "0"
-        , Html.Attributes.style "top" "0"
-        , Html.Events.on "mousedown" (Json.Decode.map MousePressed (decodeMouseRay camera state.windowSize))
-        , Html.Events.on "mousemove" (Json.Decode.map MouseMoved (decodeMouseRay camera state.windowSize))
+        [ Html.Attributes.style "display" "flex"
+        , Html.Attributes.style "justify-content" "center"
+        , Html.Attributes.style "align-items" "center"
+        , Html.Events.on "mousedown"
+            (Json.Decode.map (\pos -> MousePressed (rayTo pos)) decodeMousePosition)
+        , Html.Events.on "mousemove"
+            (Json.Decode.map (\pos -> MouseMoved (rayTo pos)) decodeMousePosition)
         , Html.Events.onMouseUp MouseReleased
+        , Html.Attributes.style "cursor"
+            (case state.maybeRaycastResult of
+                Just _ ->
+                    "grabbing"
+
+                Nothing ->
+                    "grab"
+            )
         ]
         [ Scene3d.sunny
             { upDirection = Direction3d.z
             , sunlightDirection = Direction3d.xyZ (Angle.degrees 135) (Angle.degrees -60)
             , shadows = True
-            , camera = camera
+            , camera = state.camera
             , dimensions =
-                ( Pixels.int (round state.windowSize.width)
-                , Pixels.int (round state.windowSize.height)
+                ( Pixels.int (round adjustedSize.width)
+                , Pixels.int (round adjustedSize.height)
                 )
-            , background = Scene3d.transparentBackground
+            , background = Scene3d.backgroundColor (Color.rgb 0 0 0)
             , clipDepth = Length.meters 0.1
-            , entities = List.map bodyToEntity (state.world |> World.bodies)
+            , entities =
+                (state.world |> Physics.World.bodies)
+                    |> List.map bodyToEntity
+                    |> List.map (Scene3d.scaleAbout Point3d.origin ratioScreenHeightToSceneMeter)
             }
         ]
 
 
-ballShape =
-    Sphere3d.atOrigin (Length.meters 0.1)
+tetrahedronWithRadius1Shadow =
+    Scene3d.Mesh.shadow tetrahedronWithRadius1
 
 
-bodyToEntity : Body BodyKind -> Entity WorldCoordinates
+bodyToEntity : Physics.Body.Body BodyKind -> Entity WorldCoordinates
 bodyToEntity body =
     let
         frame =
-            Body.frame body
+            Physics.Body.frame body
 
         id =
-            Body.data body
+            Physics.Body.data body
     in
     Scene3d.placeIn frame
         (case id of
             Mouse ->
-                Scene3d.sphere (Material.color Color.black)
-                    (Sphere3d.atOrigin (millimeters 30))
+                Scene3d.sphere (Material.color (Color.rgb 1 0.2 0))
+                    (Sphere3d.atOrigin (millimeters 20))
 
-            Ball ->
-                Scene3d.sphereWithShadow (Material.color (Color.rgb 0 0.5 1))
-                    ballShape
+            MouseImitation fixed ->
+                Scene3d.sphere (Material.color (Color.rgb 1 0.2 0))
+                    (Sphere3d.atOrigin (millimeters 27))
 
-            Table ->
-                tableBlocks
-                    |> List.map
-                        (Scene3d.blockWithShadow
-                            (Material.color Color.white)
-                        )
-                    |> Scene3d.group
+            Player ->
+                Scene3d.meshWithShadow
+                    (Material.color (Color.rgb 1 0.5 0.1))
+                    tetrahedronWithRadius1
+                    tetrahedronWithRadius1Shadow
+                    |> Scene3d.scaleAbout Point3d.origin 0.125
+                    |> Scene3d.rotateAround Axis3d.z (Angle.turns 0.418)
+
+            PlayerPast ->
+                Scene3d.meshWithShadow
+                    (Material.color (Color.rgb 1 0.5 0.1))
+                    tetrahedronWithRadius1
+                    tetrahedronWithRadius1Shadow
+                    |> Scene3d.scaleAbout Point3d.origin 0.125
+                    |> Scene3d.rotateAround Axis3d.z (Angle.turns 0.418)
+
+            PlayerImitation _ ->
+                Scene3d.meshWithShadow
+                    (Material.color (Color.rgb 1 0.5 0.1))
+                    tetrahedronWithRadius1
+                    tetrahedronWithRadius1Shadow
+                    |> Scene3d.scaleAbout Point3d.origin 0.125
+
+            BlockingImmovableWall dimensions ->
+                Scene3d.blockWithShadow
+                    (Material.color Color.white)
+                    (thickLinearBlock dimensions)
+
+            DraggableBlock dimensions ->
+                Scene3d.blockWithShadow
+                    (Material.color (Color.rgb 0.95 1 1))
+                    (thickLinearBlock dimensions)
+
+            DraggableBallWithCubeBehavior data ->
+                Scene3d.sphereWithShadow (Material.color (Color.rgb 1 1 1))
+                    (Sphere3d.atOrigin data.radius)
 
             Floor ->
-                Scene3d.quad (Material.matte Color.darkCharcoal)
+                Scene3d.quad (Material.matte (Color.rgb 0 0 0))
                     (Point3d.meters -15 -15 0)
                     (Point3d.meters -15 15 0)
                     (Point3d.meters 15 15 0)
@@ -770,26 +1331,27 @@ bodyToEntity body =
         )
 
 
-decodeMouseRay :
-    Camera3d Meters WorldCoordinates
-    -> { width : Float, height : Float }
-    -> Decoder (Axis3d Meters WorldCoordinates)
-decodeMouseRay camera3d windowSize =
-    Json.Decode.map2
-        (\x y ->
-            Camera3d.ray
-                camera3d
-                (Rectangle2d.with
-                    { x1 = pixels 0
-                    , y1 = Pixels.float windowSize.height
-                    , x2 = Pixels.float windowSize.width
-                    , y2 = pixels 0
-                    }
-                )
-                (Point2d.pixels x y)
-        )
-        (Json.Decode.field "pageX" Json.Decode.float)
-        (Json.Decode.field "pageY" Json.Decode.float)
+thickLinearBlock dimensions =
+    let
+        l =
+            dimensions.length |> Length.inMeters
+
+        w =
+            0.1
+
+        h =
+            0.3
+    in
+    Block3d.from
+        (Point3d.meters -(l / 2) 0 0)
+        (Point3d.meters (l / 2) -w h)
+
+
+decodeMousePosition : Decoder (Point2d Pixels WorldCoordinates)
+decodeMousePosition =
+    Json.Decode.map2 Point2d.pixels
+        (Json.Decode.field "offsetX" Json.Decode.float)
+        (Json.Decode.field "offsetY" Json.Decode.float)
 
 
 blossomColorRandom : Random.Generator Color
@@ -817,93 +1379,10 @@ blossomColorRandom =
 uiDocument : State -> Browser.Document Event
 uiDocument =
     \state ->
-        { title = "ball reach right"
+        { title = "dragahedron"
         , body =
-            state.specific |> ui |> List.singleton
+            state |> ui |> List.singleton
         }
-
-
-ui : StateSpecific -> Html Event
-ui =
-    \state ->
-        case state of
-            Menu menuState ->
-                menuState
-                    |> menuUi
-                    |> Ui.layout
-                        [ UiBackground.color (backgroundColor |> colorToUi)
-                        , UiFont.color (Ui.rgb 1 1 1)
-                        ]
-                    |> Html.map (Menu >> Specific)
-
-            Game gameState ->
-                gameState
-                    |> gameUi
-                    |> Html.map (Game >> Specific)
-
-
-menuUi : MenuState -> Ui.Element MenuEvent
-menuUi =
-    \state ->
-        Ui.column
-            [ Ui.spacing 50
-            , Ui.centerX
-            , Ui.centerY
-            ]
-            [ Ui.text "d#ia#ry"
-                |> Ui.el
-                    [ UiFont.size 50
-                    , UiFont.family [ UiFont.monospace ]
-                    ]
-            , Ui.row
-                [ Ui.spacing 5
-                , Ui.centerX
-                , Ui.centerY
-                , UiFont.size 55
-                , UiFont.extraBold
-                ]
-                (List.range 0 6
-                    |> List.map
-                        (\weekday ->
-                            Ui.column
-                                [ Ui.spacing 5
-                                , Ui.centerX
-                                , Ui.centerY
-                                , UiFont.size 55
-                                , UiFont.extraBold
-                                ]
-                                (List.range 0 3
-                                    |> List.map
-                                        (\week ->
-                                            UiInput.button
-                                                [ Ui.paddingXY 50 30
-                                                , UiBackground.color (Ui.rgba 1 1 1 0.02)
-                                                , UiBorder.rounded 100
-                                                , Ui.width Ui.fill
-                                                ]
-                                                { onPress = GameStartClicked |> Just
-                                                , label =
-                                                    Ui.text "🌼"
-                                                        |> Ui.el
-                                                            [ Ui.centerX
-                                                            , Html.Attributes.style "transform" "scale(-1, -1)" |> Ui.htmlAttribute
-                                                            , Ui.inFront
-                                                                (((1 + week) * (1 + weekday))
-                                                                    |> String.fromInt
-                                                                    |> Ui.text
-                                                                    |> Ui.el
-                                                                        [ Ui.moveDown 50
-                                                                        , Ui.moveRight 60
-                                                                        , UiFont.size 20
-                                                                        ]
-                                                                )
-                                                            ]
-                                                }
-                                        )
-                                )
-                        )
-                )
-            ]
 
 
 withAlpha : Float -> Color -> Color
@@ -921,58 +1400,33 @@ backgroundColor =
     Color.rgb 0.03 0.05 0.09
 
 
-axisToEndPointsInWidth width axis =
-    { start =
-        axis
-            |> Axis2d.intersectionPoint
-                (Axis2d.through
-                    (Point2d.fromRecord Pixels.float { x = -width / 2, y = 0 })
-                    Direction2d.positiveY
-                )
-            |> Maybe.withDefault Point2d.origin
-    , end =
-        axis
-            |> Axis2d.intersectionPoint
-                (Axis2d.through
-                    (Point2d.fromRecord Pixels.float { x = width / 2, y = 0 })
-                    Direction2d.positiveY
-                )
-            |> Maybe.withDefault Point2d.origin
-    }
-
-
 audio : AudioData -> State -> Audio.Audio
 audio audioData =
     \state ->
-        case state.specific of
-            Menu _ ->
-                Audio.silence
-
-            Game gameState ->
-                -- loop
-                audioWith state.shared.audio.music
-                    (\music ->
-                        music
-                            |> audioLoop
-                                { initialTime = gameState.initialTime
-                                , lastTick = gameState.lastTick
-                                , audioData = audioData
-                                }
-                    )
-                    :: (audioKinds
-                            |> List.map
-                                (\audioKind ->
-                                    audioWith (state.shared.audio |> accessAudioOfKind audioKind)
-                                        (\loadedAudio ->
-                                            gameState.audioTimes
-                                                |> accessAudioOfKind audioKind
-                                                |> List.map
-                                                    (\time -> Audio.audio loadedAudio (Duration.addTo time (Duration.seconds 0.07)))
-                                                |> Audio.group
-                                        )
+        -- loop
+        audioWith state.audio.music
+            (\music ->
+                music
+                    |> audioLoop
+                        { initialTime = state.initialTime
+                        , lastTick = state.lastTick
+                        , audioData = audioData
+                        }
+            )
+            :: (audioKinds
+                    |> List.map
+                        (\audioKind ->
+                            audioWith (state.audio |> accessAudioOfKind audioKind)
+                                (\loadedAudio ->
+                                    state.audioTimes
+                                        |> accessAudioOfKind audioKind
+                                        |> List.map
+                                            (\time -> Audio.audio loadedAudio (Duration.addTo time (Duration.seconds 0.07)))
+                                        |> Audio.group
                                 )
-                       )
-                    |> Audio.group
+                        )
+               )
+            |> Audio.group
 
 
 audioLoop { audioData, initialTime, lastTick } =
@@ -1061,6 +1515,26 @@ degreesLerp a b fraction =
     else
         (a + ((b - a) * fraction))
             |> floatModBy 360
+
+
+axisToEndPointsInWidth width axis =
+    { start =
+        axis
+            |> Axis2d.intersectionPoint
+                (Axis2d.through
+                    (Point2d.fromRecord Pixels.float { x = -width / 2, y = 0 })
+                    Direction2d.positiveY
+                )
+            |> Maybe.withDefault Point2d.origin
+    , end =
+        axis
+            |> Axis2d.intersectionPoint
+                (Axis2d.through
+                    (Point2d.fromRecord Pixels.float { x = width / 2, y = 0 })
+                    Direction2d.positiveY
+                )
+            |> Maybe.withDefault Point2d.origin
+    }
 
 
 floatModBy : Int -> Float -> Float
